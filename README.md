@@ -82,8 +82,8 @@ Example questions include:
 The AI assistant:
 
 - Converts natural language into SQL
-- Validates generated SQL
-- Executes safe read-only queries
+- Validates the generated SQL (see *Safety of AI-generated SQL* below)
+- Runs it in a read-only transaction with a row limit and a time limit
 - Retrieves results from PostgreSQL
 - Generates human-readable summaries
 
@@ -240,6 +240,23 @@ Displayed in Streamlit
 
 Only safe **SELECT** statements are allowed to protect database integrity.
 
+## Safety of AI-generated SQL
+
+The SQL written by the model is treated as untrusted text. Several layers protect the database:
+
+1. **Validation (`dashboard/sql_guard.py`).** A query is accepted only if it is a single `SELECT` that reads from `vw_school_directory`. It rejects comments, quoted identifiers, `UNION`, `INTO`, `COPY`, other tables, and server functions such as `pg_sleep` or `pg_read_file`. Words inside text values (for example `ILIKE '%create%'`) are allowed.
+2. **Row limit.** Results are capped at 500 rows.
+3. **Read-only session.** The query runs in a read-only transaction with a 10-second timeout.
+4. **Recommended: a restricted database role.** Create a role that can only `SELECT` from `vw_school_directory` and use it for the dashboard. This is the strongest protection and does not depend on the checks above:
+
+```sql
+CREATE ROLE zemdp_reader LOGIN PASSWORD 'choose-a-password';
+GRANT CONNECT ON DATABASE zemdp TO zemdp_reader;
+GRANT SELECT ON vw_school_directory TO zemdp_reader;
+```
+
+Put that role's details in `.env` as `DB_USER` and `DB_PASSWORD` when running the dashboard.
+
 ---
 
 # 💻 Technology Stack
@@ -276,21 +293,19 @@ Only safe **SELECT** statements are allowed to protect database integrity.
 # 📂 Project Structure
 
 ```text
-ZEMDP/
+Zimbabwe-Education-Master-Data-Platform/
 │
 ├── dashboard/                      # Streamlit application
 │   ├── pages/                      # Additional dashboard pages
 │   ├── assets/                     # Images and static assets
 │   ├── ai_engine.py                # Gemini AI engine
+│   ├── sql_guard.py                # Safety checks for AI-generated SQL
 │   ├── analytics.py                # Dashboard analytics
 │   ├── app.py                      # Main Streamlit application
-│   ├── database.py                 # PostgreSQL connection
-│   ├── export.py                   # Data export functionality
-│   └── test_models.py              # AI model testing
+│   └── database.py                 # PostgreSQL connection
 │
 ├── data/
 │   ├── raw/                        # Extracted raw datasets
-│   ├── staging/                    # Intermediate processing files
 │   └── processed/                  # Master datasets
 │
 ├── database/
@@ -302,9 +317,11 @@ ZEMDP/
 │   ├── extract/                    # Data extraction modules
 │   ├── transform/                  # Data transformation modules
 │   ├── load/                       # PostgreSQL loading modules
-│   └── main.py                     # Complete ETL pipeline
+│   ├── main.py                     # Complete ETL pipeline
+│   └── list_gemini_models.py       # Lists the Gemini models your key can use
 │
-├── .env                            # Environment variables
+├── tests/                          # Offline tests for the SQL safety checks
+├── .env.example                    # Template for your .env file
 ├── .gitignore
 ├── LICENSE
 ├── README.md
@@ -315,7 +332,8 @@ ZEMDP/
 ## Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/ZEMDP.git
+git clone https://github.com/ELIASTAFADZWAMUDZUDZDU/Zimbabwe-Education-Master-Data-Platform.git
+cd Zimbabwe-Education-Master-Data-Platform
 ```
 
 ---
@@ -330,7 +348,7 @@ pip install -r requirements.txt
 
 ## Configure Environment Variables
 
-Create a `.env` file:
+Copy `.env.example` to `.env` and fill in your own values. Never commit `.env`:
 
 ```env
 DB_HOST=localhost
@@ -340,6 +358,10 @@ DB_USER=postgres
 DB_PASSWORD=your_password
 
 GEMINI_API_KEY=your_api_key
+
+# Optional: change the Gemini models used
+# GEMINI_SQL_MODEL=gemini-3.5-flash
+# GEMINI_EXPLAIN_MODEL=gemini-flash-latest
 ```
 
 ---
@@ -368,6 +390,18 @@ The ETL pipeline will:
 ```bash
 streamlit run dashboard/app.py
 ```
+
+---
+
+# 🧪 Tests
+
+The tests run offline (no database or API key needed):
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+They check that normal questions' SQL is accepted and that dangerous SQL is rejected, including a second statement, other tables, hidden comments, `UNION`, `SELECT ... INTO`, and server functions.
 
 ---
 

@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from google import genai
 
 from database import get_connection
+from sql_guard import prepare_sql, validate_sql  # noqa: F401  (validate_sql is re-exported)
 
 
 # ==========================================================
@@ -30,7 +31,21 @@ load_dotenv()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
 
-client = genai.Client(api_key=API_KEY)
+# Model names can be changed in .env without editing the code
+SQL_MODEL = os.getenv("GEMINI_SQL_MODEL", "gemini-3.5-flash")
+EXPLAIN_MODEL = os.getenv("GEMINI_EXPLAIN_MODEL", "gemini-flash-latest")
+
+_client = None
+
+
+def get_client():
+    """Create the Gemini client on first use, so importing this module never needs a key."""
+    global _client
+    if _client is None:
+        if not API_KEY:
+            raise RuntimeError("GEMINI_API_KEY is not set. Add it to your .env file.")
+        _client = genai.Client(api_key=API_KEY)
+    return _client
 
 
 # ==========================================================
@@ -128,9 +143,9 @@ def generate_sql(question):
 
     try:
 
-        response = client.models.generate_content(
+        response = get_client().models.generate_content(
 
-            model="gemini-3.5-flash",
+            model=SQL_MODEL,
 
             contents=f"""
 
@@ -161,18 +176,28 @@ Question:
 # ==========================================================
 
 def execute_sql(sql):
+    """Run a validated query in a read-only transaction and return a DataFrame.
+
+    The SQL is checked again here (defence in depth), capped to a maximum
+    number of rows, and given a time limit.
+    """
+
+    safe_sql = prepare_sql(sql)
 
     connection = get_connection()
 
-    dataframe = pd.read_sql_query(
+    try:
 
-        sql,
+        connection.set_session(readonly=True)
 
-        connection
+        with connection.cursor() as cursor:
+            cursor.execute("SET statement_timeout = 10000;")  # 10 seconds
 
-    )
+        dataframe = pd.read_sql_query(safe_sql, connection)
 
-    connection.close()
+    finally:
+
+        connection.close()
 
     return dataframe
 
@@ -204,51 +229,12 @@ Do NOT mention SQL.
 Keep it under 100 words.
 """
 
-    response = client.models.generate_content(
+    response = get_client().models.generate_content(
 
-        model="gemini-flash-latest",
+        model=EXPLAIN_MODEL,
 
         contents=prompt
 
     )
 
-    return response.text.strip()    
-
-
-# ==========================================================
-# Validate SQL
-# ==========================================================
-
-def validate_sql(sql):
-
-    sql = sql.strip().lower()
-
-    forbidden = [
-
-        "insert",
-        "update",
-        "delete",
-        "drop",
-        "alter",
-        "truncate",
-        "create",
-        "grant",
-        "revoke"
-
-    ]
-
-    if not sql.startswith("select"):
-
-        return False
-
-    for keyword in forbidden:
-
-        if keyword in sql:
-
-            return False
-
-    if "vw_school_directory" not in sql:
-
-        return False
-
-    return True
+    return response.text.strip()
